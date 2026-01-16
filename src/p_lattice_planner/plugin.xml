@@ -1,0 +1,5 @@
+<library path="p_lattice_planner">
+  <class name="p_lattice_planner/LatticePlanner" type="p_lattice_planner::LatticePlanner" base_class_type="nav2_core::GlobalPlanner">
+    <description>This is a custom global planner plugin for Nav2 benchmarking.</description>
+  </class>
+</library>
