@@ -14,7 +14,7 @@ def generate_launch_description():
     config = os.path.join(pkg_share, 'benchmark_config.yaml')
     
     # Use one of our local maps (ensure it exists in maps/ folder of the package)
-    map_file = os.path.join(pkg_share, 'maps', '100by100_20.yaml')
+    map_file = os.path.join(pkg_share, 'maps', 'turtlebot3_world.yaml')
     
     lifecycle_nodes = ['map_server', 'planner_server']
 
@@ -24,7 +24,7 @@ def generate_launch_description():
             executable='map_server',
             name='map_server',
             output='screen',
-            parameters=[{'use_sim_time': True},
+            parameters=[{'use_sim_time': False},
                         {'yaml_filename': map_file},
                         {'topic_name': "map"}]),
 
@@ -33,7 +33,7 @@ def generate_launch_description():
             executable='planner_server',
             name='planner_server',
             output='screen',
-            parameters=[config]),
+            parameters=[config, {'use_sim_time': False}]),
 
         Node(
             package = 'tf2_ros',
@@ -52,7 +52,7 @@ def generate_launch_description():
             executable='lifecycle_manager',
             name='lifecycle_manager',
             output='screen',
-            parameters=[{'use_sim_time': True},
+            parameters=[{'use_sim_time': False},
                         {'autostart': True},
                         {'node_names': lifecycle_nodes}]),
         

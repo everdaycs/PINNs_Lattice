@@ -26,10 +26,13 @@ def getPlannerResults(navigator, initial_pose, goal_pose, planners):
         # returns ComputePathToPose.Result if successful, None otherwise
         result = navigator._getPathImpl(initial_pose, goal_pose, planner, use_start=True)
         if result is not None and hasattr(result, 'path'):
-             results[planner] = result.path
+             # result.planning_time is a builtin_interfaces/Duration
+             # Convert to seconds: sec + nanosec * 1e-9
+             p_time = result.planning_time.sec + result.planning_time.nanosec * 1e-9
+             results[planner] = {'path': result.path, 'time': p_time}
         elif result is not None:
-             # Should be path if it was wrapped differently, but let's assume it's the result
-             results[planner] = result
+             # Fallback if structure is different
+             results[planner] = {'path': result, 'time': 0.0}
         else:
             results[planner] = None
     return results
@@ -87,6 +90,49 @@ def getRandomGoal(costmap, start, max_cost, side_buffer, time_stamp, res, origin
                                goal.pose.position.y - start.pose.position.y)
              if dist > 2.0: # Minimum 2 meters
                  return goal
+
+def get_yaw(pose):
+    q = pose.pose.orientation
+    # yaw (z-axis rotation)
+    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+def calculate_metrics(path):
+    length = 0.0
+    total_turn = 0.0
+    
+    if not path or len(path.poses) < 2:
+        return 0.0, 0.0
+
+    poses = path.poses
+    
+    # Calculate initial heading based on first segment
+    dx = poses[1].pose.position.x - poses[0].pose.position.x
+    dy = poses[1].pose.position.y - poses[0].pose.position.y
+    prev_yaw = math.atan2(dy, dx)
+    
+    for i in range(1, len(poses)):
+        # Length
+        dx = poses[i].pose.position.x - poses[i-1].pose.position.x
+        dy = poses[i].pose.position.y - poses[i-1].pose.position.y
+        dist = math.hypot(dx, dy)
+        length += dist
+        
+        # Calculate heading from trajectory geometry
+        # Many grid planners don't fill orientation in poses
+        if dist > 0.001: # Skip tiny movements
+            curr_yaw = math.atan2(dy, dx)
+            diff = curr_yaw - prev_yaw
+            
+            # Normalize angle difference to [-pi, pi]
+            while diff > math.pi: diff -= 2*math.pi
+            while diff < -math.pi: diff += 2*math.pi
+            
+            total_turn += abs(diff)
+            prev_yaw = curr_yaw
+        
+    return length, total_turn
 
 def main():
     rclpy.init()
@@ -150,18 +196,22 @@ def main():
         planner_results = getPlannerResults(navigator, start, goal, planners)
         
         for p in planners:
-            path = planner_results.get(p)
-            if path:
-                path_len = 0.0
-                # Calculate path length
-                for k in range(1, len(path.poses)):
-                    path_len += math.hypot(path.poses[k].pose.position.x - path.poses[k-1].pose.position.x,
-                                           path.poses[k].pose.position.y - path.poses[k-1].pose.position.y)
+            res_data = planner_results.get(p)
+            if res_data and res_data['path']:
+                path = res_data['path']
+                p_time = res_data['time']
                 
-                results[p].append({'success': True, 'length': path_len})
-                print(f"    {p}: Success, Length: {path_len:.2f}")
+                path_len, total_turn = calculate_metrics(path)
+                
+                results[p].append({
+                    'success': True, 
+                    'length': path_len,
+                    'time': p_time,
+                    'turn': total_turn
+                })
+                print(f"    {p}: Success, Len: {path_len:.2f}m, Turn: {total_turn:.2f}rad, Time: {p_time*1000:.1f}ms")
             else:
-                results[p].append({'success': False, 'length': 0.0})
+                results[p].append({'success': False, 'length': 0.0, 'time': 0.0, 'turn': 0.0})
                 print(f"    {p}: Failed")
         
         i += 1
@@ -171,10 +221,26 @@ def main():
     for p in planners:
         stats = results[p]
         success_count = sum(1 for r in stats if r['success'])
-        avg_len = sum(r['length'] for r in stats if r['success']) / success_count if success_count > 0 else 0
+        
+        if success_count > 0:
+            success_runs = [r for r in stats if r['success']]
+            avg_len = sum(r['length'] for r in success_runs) / success_count
+            avg_turn = sum(r['turn'] for r in success_runs) / success_count
+            
+            times = [r['time'] * 1000.0 for r in success_runs] # ms
+            avg_time = sum(times) / success_count
+            p95_time = np.percentile(times, 95)
+        else:
+            avg_len = 0.0
+            avg_turn = 0.0
+            avg_time = 0.0
+            p95_time = 0.0
+            
         print(f"Planner: {p}")
         print(f"  Success Rate: {success_count}/{random_pairs} ({success_count/random_pairs*100:.1f}%)")
-        print(f"  Avg Length:   {avg_len:.2f}")
+        print(f"  Avg Length:   {avg_len:.2f} m")
+        print(f"  Avg Turn (Energy Proxy): {avg_turn:.2f} rad")
+        print(f"  Comp Cost (Time): Avg: {avg_time:.2f} ms, P95: {p95_time:.2f} ms")
 
 if __name__ == '__main__':
     main()
