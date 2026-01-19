@@ -65,14 +65,14 @@ docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash
 #### **终端 3：运行 Benchmark 自动化脚本**
 运行此脚本将自动重置小车位置，并根据预设坐标进行导航性能分析：
 ```bash
-docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash && python3 src/saye_bringup/scripts/benchmark_ackermann.py"
+docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash && python3 /root/colcon_ws/src/saye_bringup/scripts/benchmark_ackermann.py"
 ```
 
 ---
 
 ## 注意事项
 
-*   **路径更新**：原 `ackermann-vehicle-gzsim-ros2` 已整合进根目录。所有包的源代码现在位于主工作空间的 `src/` 目录下。
+
 *   **重置机制**：Benchmark 脚本通过直接调用 `gz service` API 实现瞬移重置，不依赖 ROS Topic，因此响应速度更快。
 *   **网络设置**：容器内部与宿主机共享网络，若需查看传感器原始数据，可在宿主机安装 ROS 2 Jazzy 并直接订阅相关话题。
 
