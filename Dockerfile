@@ -34,18 +34,15 @@ RUN apt-get update -qq \
         ros-${ROS_DISTRO}-behaviortree-cpp-v3 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p ${COLCON_WS_SRC}\
-    && git clone https://github.com/alitekes1/ackermann-vehicle-gzsim-ros2.git ${COLCON_WS_SRC}/ackermann-vehicle-gzsim-ros2 \
-    && cd ${COLCON_WS}\
-    && . /opt/ros/${ROS_DISTRO}/setup.sh\
-    && colcon build
+RUN mkdir -p ${COLCON_WS_SRC}
 
 # Set environment variables for resource and plugin paths
 ENV GZ_SIM_RESOURCE_PATH=$GZ_SIM_RESOURCE_PATH:${COLCON_WS_SRC}
+ENV GZ_SIM_RESOURCE_PATH=$GZ_SIM_RESOURCE_PATH:${COLCON_WS}/install/saye_description/share
 ENV ROS_PACKAGE_PATH=$ROS_PACKAGE_PATH:${COLCON_WS_SRC}
 
 # Source ROS and workspace on shell startup
 RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /root/.bashrc && \
     echo "source /root/colcon_ws/install/setup.bash" >> /root/.bashrc
 
-CMD ["bash", "-c", "cd /root/colcon_ws && source install/setup.bash && exec bash"]
+CMD ["bash"]

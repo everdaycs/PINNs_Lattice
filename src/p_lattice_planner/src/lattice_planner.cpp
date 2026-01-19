@@ -262,8 +262,10 @@ void LatticePlanner::deactivate()
 
 nav_msgs::msg::Path LatticePlanner::createPlan(
   const geometry_msgs::msg::PoseStamped & start,
-  const geometry_msgs::msg::PoseStamped & goal)
+  const geometry_msgs::msg::PoseStamped & goal,
+  std::function<bool()> cancel_checker)
 {
+  (void)cancel_checker;
   nav_msgs::msg::Path path;
   path.header.stamp = clock_->now();
   path.header.frame_id = costmap_ros_->getGlobalFrameID();
