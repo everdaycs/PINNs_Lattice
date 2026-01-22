@@ -62,11 +62,21 @@ docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash
 docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash && ros2 launch saye_bringup navigation_bringup.launch.py"
 ```
 
-#### **终端 3：运行 Benchmark 自动化脚本**
-运行此脚本将自动重置小车位置，并根据预设坐标进行导航性能分析：
+#### **终端 3：运行 Benchmark 自动化评测**
+运行此脚本将自动重置小车位置，并根据预设坐标进行导航性能分析 (支持 HybridAStar, Lattice 等不同规划器对比)：
+
+**基础运行 (使用 Hybrid A*)**：
 ```bash
-docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash && python3 /root/colcon_ws/src/saye_bringup/scripts/benchmark_ackermann.py"
+docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash && python3 /root/colcon_ws/src/saye_bringup/scripts/benchmark_system.py --planner HybridAStar --out_dir /root/colcon_ws/benchmark_results --test_file /root/colcon_ws/src/saye_bringup/config/test_poses.yaml"
 ```
+
+**参数说明：**
+* `--planner`: 规划器标签 (如 `HybridAStar`, `Lattice`)，仅用于记录，不会改变实际加载的插件（需在 nav2_params.yaml 修改）。
+* `--test_file`: 测试用例配置文件路径 (默认为 `src/saye_bringup/config/test_poses.yaml`)。
+* `--out_dir`: 结果输出目录，将生成 `metrics.csv` 和 `summary.json`。
+
+**结果查看：**
+运行结束后，可在宿主机查看 `PINNs_Lattice/benchmark_results` 目录下的 CSV 和 JSON 报告。
 
 ---
 

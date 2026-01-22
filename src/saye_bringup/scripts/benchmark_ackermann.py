@@ -15,6 +15,8 @@ import numpy as np
 import logging
 import datetime
 import os
+import argparse
+from ament_index_python.packages import get_package_share_directory
 
 # Setup logging
 log_dir = "/root/colcon_ws/benchmark_logs"
@@ -174,15 +176,40 @@ def get_random_pose(min_x, max_x, min_y, max_y):
 def main():
     rclpy.init()
     
+    # Parse arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--planner', type=str, default='default', choices=['default', 'lattice'], help='Planner to use.')
+    parser.add_argument('--trials', type=int, default=5, help='Number of trials')
+    
+    # Use parse_known_args to handle ROS args properly if any
+    args, _ = parser.parse_known_args()
+
     benchmark_node = BenchmarkRunner()
     navigator = BasicNavigator()
+    
+    # Determine BT XML path
+    bt_xml_path = ''
+    if args.planner == 'lattice':
+        try:
+            pkg_share = get_package_share_directory('saye_bringup')
+            bt_xml_path = os.path.join(pkg_share, 'config', 'navigate_with_lattice.xml')
+            if not os.path.exists(bt_xml_path):
+                 # Fallback for source workspace if not yet installed/sourced
+                 # Assuming script is in src/saye_bringup/scripts
+                 script_dir = os.path.dirname(os.path.abspath(__file__))
+                 bt_xml_path = os.path.join(script_dir, '..', 'config', 'navigate_with_lattice.xml')
+            
+            print(f"Using Lattice Planner with BT: {bt_xml_path}")
+        except Exception as e:
+            print(f"Error finding BT XML: {e}")
+            return
 
     # Define a safe area within the map
     # Adjusted to a smaller inner area to reduce chance of spawning in obstacles
     # Was: (-8.0, 8.0, -8.0, 8.0)
     bounds = (-5.0, 5.0, -5.0, 5.0) 
 
-    num_trials = 5
+    num_trials = args.trials
     results = []
 
     # Wait for Nav2 to be fully active
@@ -261,7 +288,7 @@ def main():
         benchmark_node.metric_start_time = time.time()
         
         start_time = time.time()
-        navigator.goToPose(goal_pose)
+        navigator.goToPose(goal_pose, behavior_tree=bt_xml_path)
         
         print("Navigating...")
         while not navigator.isTaskComplete():

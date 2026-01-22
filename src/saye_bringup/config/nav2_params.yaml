@@ -108,7 +108,7 @@ controller_server:
       wz_max: 1.9
       iteration_count: 1
       prune_distance: 1.7
-      transform_tolerance: 0.5  # 增加变换容错性
+      transform_tolerance: 0.3  # 增加变换容错性
       temperature: 0.3
       gamma: 0.015
       motion_model: "Ackermann"
@@ -283,7 +283,7 @@ map_saver:
 planner_server:
   ros__parameters:
     expected_planner_frequency: 20.0
-    planner_plugins: ["GridBased", "SmacPlannerHybrid"]
+    planner_plugins: ["GridBased", "SmacPlannerHybrid", "LatticePlanner"]
     costmap_update_timeout: 1.0
     
     GridBased:
@@ -291,6 +291,13 @@ planner_server:
       tolerance: 0.5
       use_astar: false
       allow_unknown: true
+
+    LatticePlanner:
+      plugin: "p_lattice_planner/LatticePlanner"
+      tolerance: 0.5
+      allow_unknown: true
+      max_planning_time_ms: 2000
+      use_astar: true
     
     SmacPlannerHybrid:
       plugin: "nav2_smac_planner::SmacPlannerHybrid"
