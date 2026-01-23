@@ -5,10 +5,11 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from geometry_msgs.msg import PoseStamped, Pose, Twist, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, OccupancyGrid, Path
-from nav2_msgs.action import NavigateToPose
-from nav2_msgs.srv import ClearEntireCostmap # Add service import
-from tf2_ros import Buffer, TransformListener # Add TF imports
-import tf2_geometry_msgs # Add TF geometry support
+from nav2_msgs.action import NavigateToPose, ComputePathToPose # Add ComputePathToPose
+from nav2_msgs.srv import ClearEntireCostmap 
+from tf2_ros import Buffer, TransformListener 
+import tf2_geometry_msgs 
+# ... (保持原有 import)
 from ament_index_python.packages import get_package_share_directory
 import numpy as np
 import yaml
@@ -217,8 +218,9 @@ class BenchmarkRunner:
     def __init__(self, node: DataRecorder):
         self.node = node
         self.config = MetricConfig()
-        # 直接使用 Action Client 进行导航，比 BasicNavigator 更底层，更容易控制 timing
+        # Actions
         self.nav_client = ActionClient(self.node, NavigateToPose, 'navigate_to_pose')
+        self.planner_client = ActionClient(self.node, ComputePathToPose, 'compute_path_to_pose')
         
         # TF Buffer
         self.tf_buffer = Buffer()
@@ -297,15 +299,33 @@ class BenchmarkRunner:
         time.sleep(0.5)
         
         # 5. Invoke Navigation
+        # Simplified BT XML for Jazzy: explicitly mapping ports
+        bt_xml = f"""<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="NavSequence">
+      <ComputePathToPose goal="{{goal}}" path="{{path}}" planner_id="{planner_id}"/>
+      <FollowPath path="{{path}}" controller_id="FollowPath"/>
+    </Sequence>
+  </BehaviorTree>
+</root>"""
+        bt_path = f"/tmp/nav2_bt_{planner_id}.xml"
+        with open(bt_path, 'w') as f:
+            f.write(bt_xml)
+        
+        # NOTE: If status 6 persists, it usually means the robot is in collision 
+        # or the global costmap hasn't updated the robot's new position yet.
+        # We add an extra small wait before sending the goal.
+        time.sleep(1.0) 
+        
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = 'map'
         goal_msg.pose.header.stamp = self.node.get_clock().now().to_msg()
         goal_msg.pose.pose = goal_pose
-        # 如果需要指定行为树，可以在 goal_msg.behavior_tree 中指定，或在参数中指定
+        goal_msg.behavior_tree = bt_path
         
         self.node.start_recording()
         
-        print("Sending Goal...")
+        print(f"Sending Goal with Planner: {planner_id} (BT: {bt_path})...")
         send_goal_future = self.nav_client.send_goal_async(goal_msg)
         rclpy.spin_until_future_complete(self.node, send_goal_future)
         goal_handle = send_goal_future.result()
@@ -322,14 +342,19 @@ class BenchmarkRunner:
             rclpy.spin_once(self.node, timeout_sec=0.1)
             
         # Task done
+        status = result_future.result().status
         duration = self.node.stop_recording()
         metrics = self.node.compute_metrics(self.config, goal_pose)
         
         if metrics:
-            print(f"Result: {'SUCCESS' if metrics['success'] else 'FAIL'}")
+            print(f"Result: {'SUCCESS' if metrics['success'] else 'FAIL'} (Status: {status})")
             print(f"Time: {metrics['duration']:.2f}s | CTE: {metrics['tracking_error_rmse']:.3f}m | LatAccel: {metrics['max_lateral_accel']:.2f}")
             print(f"End Error: Dist={metrics['final_dist_error']:.3f}m / Yaw={metrics['final_yaw_error']:.3f}rad")
             metrics['case_id'] = case_id
+        else:
+            print(f"Task Ended Instantly! Status: {status}")
+            # Minimal metrics to avoid breaking CSV
+            metrics = {'case_id': case_id, 'success': 0, 'duration': 0.0, 'tracking_error_rmse': -1.0}
         
         return metrics
 
@@ -370,7 +395,7 @@ class BenchmarkRunner:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--test_file', type=str, default='src/saye_bringup/config/test_poses.yaml', help='YAML file with test cases')
-    parser.add_argument('--planner', type=str, default='GridBased', help='Info tag for output')
+    parser.add_argument('--planners', type=str, nargs='+', default=['GridBased'], help='List of planners to benchmark (e.g. GridBased SmacPlannerHybrid)')
     parser.add_argument('--out_dir', type=str, default='benchmark_out', help='Output directory')
     args = parser.parse_args()
 
@@ -392,70 +417,77 @@ def main():
         print("No test file found. Using placeholder random case.")
         cases = [{'id': 0, 'start': {'x':0.0, 'y':0.0, 'yaw':0.0}, 'goal': {'x':5.0, 'y':5.0, 'yaw':0.0}}]
 
-    # Prepare Output
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    res_dir = os.path.join(args.out_dir, timestamp, args.planner)
-    os.makedirs(res_dir, exist_ok=True)
-    csv_file = os.path.join(res_dir, 'metrics.csv')
-    
-    all_metrics = []
+    # Prepare Overall Session Output
+    session_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     
     try:
-        for case in cases:
-            # Parse YAML Pose
-            start = Pose()
-            start.position.x = float(case['start']['x'])
-            start.position.y = float(case['start']['y'])
-            sy = math.sin(case['start']['yaw'] * 0.5)
-            cy = math.cos(case['start']['yaw'] * 0.5)
-            start.orientation.z = sy
-            start.orientation.w = cy
+        for p_id in args.planners:
+            print(f"\n" + "="*50)
+            print(f">>> STARTING BENCHMARK FOR PLANNER: {p_id}")
+            print("="*50)
             
-            goal = Pose()
-            goal.position.x = float(case['goal']['x'])
-            goal.position.y = float(case['goal']['y'])
-            sy = math.sin(case['goal']['yaw'] * 0.5)
-            cy = math.cos(case['goal']['yaw'] * 0.5)
-            goal.orientation.z = sy
-            goal.orientation.w = cy
+            res_dir = os.path.join(args.out_dir, session_timestamp, p_id)
+            os.makedirs(res_dir, exist_ok=True)
+            csv_file = os.path.join(res_dir, 'metrics.csv')
             
-            # Run
-            m = runner.run_case(case['id'], start, goal, args.planner)
+            all_metrics = []
             
-            if m:
-                all_metrics.append(m)
+            for case in cases:
+                # Parse YAML Pose
+                start = Pose()
+                start.position.x = float(case['start']['x'])
+                start.position.y = float(case['start']['y'])
+                sy = math.sin(case['start']['yaw'] * 0.5)
+                cy = math.cos(case['start']['yaw'] * 0.5)
+                start.orientation.z = sy
+                start.orientation.w = cy
                 
-                # Write CSV immediately (append mode)
-                file_exists = os.path.isfile(csv_file)
-                with open(csv_file, 'a', newline='') as f:
-                    writer = csv.DictWriter(f, fieldnames=m.keys())
-                    if not file_exists:
-                        writer.writeheader()
-                    writer.writerow(m)
+                goal = Pose()
+                goal.position.x = float(case['goal']['x'])
+                goal.position.y = float(case['goal']['y'])
+                sy = math.sin(case['goal']['yaw'] * 0.5)
+                cy = math.cos(case['goal']['yaw'] * 0.5)
+                goal.orientation.z = sy
+                goal.orientation.w = cy
+                
+                # Run
+                m = runner.run_case(case['id'], start, goal, p_id)
+                
+                if m:
+                    all_metrics.append(m)
+                    
+                    # Write CSV immediately (append mode)
+                    file_exists = os.path.isfile(csv_file)
+                    with open(csv_file, 'a', newline='') as f:
+                        writer = csv.DictWriter(f, fieldnames=m.keys())
+                        if not file_exists:
+                            writer.writeheader()
+                        writer.writerow(m)
+            
+            # Summary for this planner
+            if all_metrics:
+                success_count = sum(m['success'] for m in all_metrics)
+                avg_cte = np.mean([m['tracking_error_rmse'] for m in all_metrics])
+                avg_time = np.mean([m['duration'] for m in all_metrics])
+                
+                summary = {
+                    'planner': p_id,
+                    'total_cases': len(all_metrics),
+                    'success_rate': success_count / len(all_metrics),
+                    'avg_tracking_error': avg_cte,
+                    'avg_duration': avg_time
+                }
+                
+                with open(os.path.join(res_dir, 'summary.json'), 'w') as f:
+                    json.dump(summary, f, indent=2)
+                
+                print(f"\n--- {p_id} Summary ---")
+                print(json.dumps(summary, indent=2))
                     
     except KeyboardInterrupt:
-        print("Interrupted!")
+        print("Interrupted by user!")
         
-    # Summary JSON
-    if all_metrics:
-        success_count = sum(m['success'] for m in all_metrics)
-        avg_cte = np.mean([m['tracking_error_rmse'] for m in all_metrics])
-        avg_time = np.mean([m['duration'] for m in all_metrics])
-        
-        summary = {
-            'planner': args.planner,
-            'total_cases': len(all_metrics),
-            'success_rate': success_count / len(all_metrics),
-            'avg_tracking_error': avg_cte,
-            'avg_duration': avg_time
-        }
-        
-        with open(os.path.join(res_dir, 'summary.json'), 'w') as f:
-            json.dump(summary, f, indent=2)
-            
-        print("\n=== Summary ===")
-        print(json.dumps(summary, indent=2))
-        print(f"Detailed logs saved to {res_dir}")
+    print(f"\nTotal session logs saved to {os.path.join(args.out_dir, session_timestamp)}")
 
     try:
         if rclpy.ok():

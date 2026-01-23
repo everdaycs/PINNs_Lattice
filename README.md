@@ -63,20 +63,38 @@ docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash
 ```
 
 #### **终端 3：运行 Benchmark 自动化评测**
-运行此脚本将自动重置小车位置，并根据预设坐标进行导航性能分析 (支持 HybridAStar, Lattice 等不同规划器对比)：
+运行此脚本将自动重置小车位置，并根据预设坐标进行导航性能分析。支持多规划器顺序对比：
 
-**基础运行 (使用 Hybrid A*)**：
+**1. 基础运行 (支持多个规划器顺序测试)**：
 ```bash
-docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash && python3 /root/colcon_ws/src/saye_bringup/scripts/benchmark_system.py --planner HybridAStar --out_dir /root/colcon_ws/benchmark_results --test_file /root/colcon_ws/src/saye_bringup/config/test_poses.yaml"
+docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash && python3 /root/colcon_ws/src/saye_bringup/scripts/benchmark_system.py --planners GridBased SmacPlannerHybrid SmacPlannerLattice LatticePlanner --out_dir /root/colcon_ws/benchmark_results --test_file /root/colcon_ws/src/saye_bringup/config/test_poses.yaml"
 ```
 
+**2. 各规划器说明与单独测试命令**：
+*   **GridBased (Dijkstra)**: 提供理论最短路径基准。
+    ```bash
+    --planners GridBased
+    ```
+*   **SmacPlannerHybrid (Hybrid A*)**: 官方阿克曼连续空间搜索基准。
+    ```bash
+    --planners SmacPlannerHybrid
+    ```
+*   **SmacPlannerLattice (State Lattice)**: 官方预计算运动基元基准。
+    ```bash
+    --planners SmacPlannerLattice
+    ```
+*   **LatticePlanner (PINNs)**: 本项目研究的基于神经网络的规划器。
+    ```bash
+    --planners LatticePlanner
+    ```
+
 **参数说明：**
-* `--planner`: 规划器标签 (如 `HybridAStar`, `Lattice`)，仅用于记录，不会改变实际加载的插件（需在 nav2_params.yaml 修改）。
+* `--planners`: 规划器列表，支持同时传入多个，程序将按顺序全自动跑完所有测试用例。
 * `--test_file`: 测试用例配置文件路径 (默认为 `src/saye_bringup/config/test_poses.yaml`)。
-* `--out_dir`: 结果输出目录，将生成 `metrics.csv` 和 `summary.json`。
+* `--out_dir`: 结果输出目录，每个规划器将拥有独立的子文件夹。
 
 **结果查看：**
-运行结束后，可在宿主机查看 `PINNs_Lattice/benchmark_results` 目录下的 CSV 和 JSON 报告。
+运行结束后，可在宿主机查看 `PINNs_Lattice/benchmark_results/<时间戳>/<规划器名>` 目录下的 `metrics.csv` 和 `summary.json`。
 
 ---
 
