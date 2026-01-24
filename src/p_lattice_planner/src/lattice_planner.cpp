@@ -59,6 +59,7 @@ public:
     double cost_h;
     double cost_f;
     unsigned int parent_index; // To reconstruct path
+    double v_limit = 1.0; // P2 corrected speed
 
     // For priority queue
     bool operator>(const Node & other) const
@@ -67,7 +68,10 @@ public:
     }
   };
 
-  SearchCore(GridAdapter * grid_adapter) : grid_adapter_(grid_adapter) {}
+  SearchCore(GridAdapter * grid_adapter, std::shared_ptr<pinn::EdgeDynamicsEvaluator> evaluator) 
+    : grid_adapter_(grid_adapter), pinn_evaluator_(evaluator) {}
+
+  void setVehicleParams(const pinn::VehicleParams& params) { veh_ = params; }
 
   // A* Search
   bool search(
@@ -135,18 +139,33 @@ public:
           continue;
         }
 
-        double new_cost = cost_so_far[current.index] + move_cost[i];
+        // PINN Search Evaluator Integration
+        double v_next = current.v_limit;
+        if (pinn_evaluator_) {
+          // For grid search, we treat each direction as a primitive index
+          auto res = pinn_evaluator_->evaluate(i, current.v_limit, 0.0); 
+          if (res.zone == pinn::Zone::RED) {
+            continue; // Prune unsafe edges
+          }
+          v_next = res.v_safe;
+        }
+
+        double edge_cost = move_cost[i];
+        if (v_next > 0.01) {
+          edge_cost = move_cost[i] / v_next; // Time-based cost
+        }
+
+        double new_cost = cost_so_far[current.index] + edge_cost;
         
-        // Add cost penalty for traversing high cost areas (optional, basic A* just uses distance usually)
         if (cost > 0 && cost != 255) {
-            new_cost += cost / 255.0; // Minimal penalty
+            new_cost += cost / 255.0; 
         }
 
         if (cost_so_far.find(next_index) == cost_so_far.end() || new_cost < cost_so_far[next_index])
         {
           cost_so_far[next_index] = new_cost;
           double h = heuristic(next_x, next_y, goal_x, goal_y);
-          open_list.push({next_x, next_y, next_index, new_cost, h, new_cost + h, current.index});
+          open_list.push({next_x, next_y, next_index, new_cost, h, new_cost + h, current.index, v_next});
           came_from[next_index] = current.index;
         }
       }
@@ -157,6 +176,8 @@ public:
 
 private:
   GridAdapter * grid_adapter_;
+  std::shared_ptr<pinn::EdgeDynamicsEvaluator> pinn_evaluator_;
+  pinn::VehicleParams veh_;
 
   double heuristic(unsigned int x1, unsigned int y1, unsigned int x2, unsigned int y2)
   {
@@ -235,8 +256,14 @@ void LatticePlanner::configure(
   node->get_parameter(name + ".max_planning_time_ms", max_planning_time_ms_);
   node->get_parameter(name + ".use_astar", use_astar_);
 
+  // PINN Integration
+  if (parent_node_.lock()) {
+    pinn_evaluator_ = std::make_shared<pinn::EdgeDynamicsEvaluator>();
+    pinn_evaluator_->configure(parent_node_.lock(), name);
+  }
+
   grid_adapter_ = std::make_unique<GridAdapter>(costmap_);
-  search_core_ = std::make_unique<SearchCore>(grid_adapter_.get());
+  search_core_ = std::make_unique<SearchCore>(grid_adapter_.get(), pinn_evaluator_);
 }
 
 void LatticePlanner::cleanup()

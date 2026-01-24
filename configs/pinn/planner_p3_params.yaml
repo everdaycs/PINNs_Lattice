@@ -1,0 +1,39 @@
+# P3 Strategy Configuration for Nav2 Smac Planner (Lattice)
+planner_server:
+  ros__parameters:
+    Planner:
+      plugin: "nav2_smac_planner/SmacPlanner"
+      
+      # Standard Smac config omitted...
+      
+      # PINN P3 Strategy Config
+      pinn:
+        # --- Feature Switches ---
+        enable_p1: true  # Feasibility Filter
+        enable_p2: true  # Speed Corrector
+        
+        # --- Models ---
+        # Paths must be absolute or resolved via launch
+        p1_model_path: "/root/colcon_ws/artifacts/pinn/p1_model.ts"
+        p1_norm_path: "/root/colcon_ws/artifacts/pinn/p1_norm.json"
+        
+        p2_model_path: "/root/colcon_ws/artifacts/pinn/p2_model.ts"
+        p2_norm_path: "/root/colcon_ws/artifacts/pinn/p2_norm.json"
+        p2_meta_path: "/root/colcon_ws/artifacts/pinn/p2_meta.json"
+        
+        # --- Thresholds (Risk: 0.0 Safe - 1.0+ Infoasible) ---
+        threshold_ok: 0.2    # Risk <= 0.2: Safe, slight penalty
+        threshold_try: 0.8   # 0.2 < Risk <= 0.8: Try to correct speed using P2
+        # Risk > 0.8: Prune immediately
+        
+        # --- Weights ---
+        w_risk: 5.0          # Cost added proportional to risk: cost += w * risk
+        w_time: 2.0          # Cost added for slower speed: cost += w * (len/v_safe)
+        w_fail: 500.0        # Huge penalty if fallback_mode is 'penalize' and correction fails
+        
+        # --- Strategy ---
+        fallback_mode: "prune" # Options: "prune", "penalize"
+        
+        # --- Caching Optimization ---
+        v0_bin_size: 0.1     # Quantization for cache key (m/s)
+        mu_bin_size: 0.1     # Quantization for cache key (0-1)

@@ -24,6 +24,9 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /run/user:/run/user:ro
       - ./src:/root/colcon_ws/src
+      - ./configs:/root/colcon_ws/configs
+      - ./scripts:/root/colcon_ws/scripts
+      - ./data:/root/colcon_ws/data
     privileged: true
     deploy:
       resources:

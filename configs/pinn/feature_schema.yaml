@@ -1,0 +1,50 @@
+# P1 Feasibility Model Feature Schema
+# 必须与 EdgeFeatureExtractor.cpp 严格对齐
+
+features:
+  # Geometry (Dim: 6)
+  - name: length_m
+    norm: true
+    missing: 1.0 # default if missing
+    
+  - name: delta_yaw_rad
+    norm: true
+    missing: 0.0
+    
+  - name: delta_x_local_m # local frame end x
+    norm: true
+    missing: 0.5
+    
+  - name: delta_y_local_m # local frame end y
+    norm: true
+    missing: 0.0
+    
+  - name: curvature_mean_inv_m
+    norm: true
+    missing: 0.0
+    
+  - name: curvature_max_inv_m
+    norm: true
+    missing: 0.0
+
+  # Dynamics (Dim: 2)
+  - name: v0_mps
+    norm: true
+    missing: 0.5
+    
+  - name: mu
+    norm: true # Friction can vary
+    missing: 0.5
+
+  # Vehicle (Dim: 2)
+  - name: wheelbase_m
+    norm: false # Usually constant, normalization optional
+    missing: 0.2255
+    
+  - name: steering_limit_rad
+    norm: false
+    missing: 0.40
+
+# Output definition
+target: "risk" # 0-1+, where >1 is infeasible/collision
+threshold_prune: 1.0

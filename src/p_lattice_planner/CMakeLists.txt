@@ -15,6 +15,17 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(pinn REQUIRED)
+
+# LibTorch
+execute_process(
+  COMMAND python3 -c "import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), 'share/cmake/Torch'), end='')"
+  OUTPUT_VARIABLE TORCH_CMAKE_PATH
+)
+if(TORCH_CMAKE_PATH)
+  list(APPEND CMAKE_PREFIX_PATH "${TORCH_CMAKE_PATH}")
+endif()
+find_package(Torch REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/lattice_planner.cpp
@@ -23,6 +34,11 @@ add_library(${PROJECT_NAME} SHARED
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
+  ${TORCH_INCLUDE_DIRS}
+)
+
+target_link_libraries(${PROJECT_NAME}
+  ${TORCH_LIBRARIES}
 )
 
 ament_target_dependencies(${PROJECT_NAME}
@@ -35,6 +51,7 @@ ament_target_dependencies(${PROJECT_NAME}
   nav_msgs
   pluginlib
   tf2_ros
+  pinn
 )
 
 pluginlib_export_plugin_description_file(nav2_core plugin.xml)

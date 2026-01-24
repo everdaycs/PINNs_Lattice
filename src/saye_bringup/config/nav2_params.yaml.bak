@@ -6,7 +6,7 @@ amcl:
     alpha3: 0.2
     alpha4: 0.2
     alpha5: 0.2
-    base_frame_id: "saye/base_link"
+    base_frame_id: "saye"
     beam_skip_distance: 0.5
     beam_skip_error_threshold: 0.9
     beam_skip_threshold: 0.3
@@ -50,9 +50,8 @@ amcl:
 
 bt_navigator:
   ros__parameters:
-    use_sim_time: True
     global_frame: map
-    robot_base_frame: saye/base_link
+    robot_base_frame: saye
     odom_topic: /odom
     bt_loop_duration: 10
     default_server_timeout: 20
@@ -69,7 +68,6 @@ bt_navigator:
 
 controller_server:
   ros__parameters:
-    use_sim_time: True
     controller_frequency: 20.0 
     costmap_update_timeout: 0.30
     min_x_velocity_threshold: 0.001
@@ -198,11 +196,10 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
-      use_sim_time: True
       update_frequency: 5.0
       publish_frequency: 2.0
       global_frame: odom
-      robot_base_frame: saye/base_link
+      robot_base_frame: saye
       rolling_window: true
       width: 3
       height: 3
@@ -239,11 +236,10 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      use_sim_time: True
       update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: map
-      robot_base_frame: saye/base_link
+      robot_base_frame: saye
       # 使用footprint与local_costmap保持一致
       footprint: "[[0.15, 0.045], [0.15, -0.045], [-0.15, -0.045], [-0.15, 0.045]]"
       resolution: 0.05
@@ -286,10 +282,8 @@ map_saver:
 
 planner_server:
   ros__parameters:
-    use_sim_time: True
     expected_planner_frequency: 20.0
-    planner_plugins: ["GridBased", "SmacPlannerHybrid", "SmacPlannerLattice"] 
-    # Added LatticePlanner back
+    planner_plugins: ["GridBased", "SmacPlannerHybrid", "SmacPlannerLattice", "LatticePlanner"]
     costmap_update_timeout: 1.0
     
     GridBased:
@@ -304,15 +298,6 @@ planner_server:
       allow_unknown: true
       max_planning_time_ms: 2000
       use_astar: true
-      p1_model_path: "/root/colcon_ws/artifacts/pinn/p1_model.ts"
-      p1_norm_path: "/root/colcon_ws/artifacts/pinn/p1_norm.json"
-      p2_model_path: "/root/colcon_ws/artifacts/pinn/p2_model.ts"
-      p2_norm_path: "/root/colcon_ws/artifacts/pinn/p2_norm.json"
-      p2_meta_path: "/root/colcon_ws/artifacts/pinn/p2_meta.json"
-      enable_p1: true
-      enable_p2: true
-      threshold_ok: 0.2
-      threshold_try: 0.8
     
     SmacPlannerHybrid:
       plugin: "nav2_smac_planner::SmacPlannerHybrid"
@@ -327,7 +312,7 @@ planner_server:
       angle_quantization_bins: 72
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
-      minimum_turning_radius: 0.55  # 修正：根据saye物理极限(L=0.2255, alpha=0.4 => R=0.533)调整
+      minimum_turning_radius: 0.20
       reverse_penalty: 0.3  # 显著降低倒车惩罚，允许掉头时倒车
       change_penalty: 0.1   # 降低方向改变惩罚
       non_straight_penalty: 1.0  # 降低非直线惩罚
@@ -351,7 +336,7 @@ planner_server:
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
       reverse_allowed: false
-      lattice_filepath: "/root/colcon_ws/src/saye_bringup/config/saye_lattice_primitives.json" # 修正：指向匹配saye物理特性的运动元
+      lattice_filepath: "/opt/ros/jazzy/share/nav2_smac_planner/sample_primitives/5cm_resolution/1m_turning_radius/ackermann/output.json"
       cache_obstacle_heuristic: false
       debug_visualizations: true
       use_quadratic_cost_penalty: False
@@ -359,7 +344,6 @@ planner_server:
 
 smoother_server:
   ros__parameters:
-    use_sim_time: True
     smoother_plugins: ["simple_smoother"]
     simple_smoother:
       plugin: "nav2_smoother::SimpleSmoother"
@@ -369,7 +353,6 @@ smoother_server:
 
 behavior_server:
   ros__parameters:
-    use_sim_time: True
     local_costmap_topic: local_costmap/costmap_raw
     global_costmap_topic: global_costmap/costmap_raw
     local_footprint_topic: local_costmap/published_footprint
@@ -388,7 +371,7 @@ behavior_server:
       plugin: "nav2_behaviors::AssistedTeleop"
     local_frame: odom
     global_frame: map
-    robot_base_frame: saye/base_link
+    robot_base_frame: saye
     transform_tolerance: 0.1
     simulate_ahead_time: 2.0
     max_rotational_vel: 1.0
@@ -397,7 +380,6 @@ behavior_server:
 
 waypoint_follower:
   ros__parameters:
-    use_sim_time: True
     loop_rate: 20
     stop_on_failure: false
     action_server_result_timeout: 900.0
@@ -425,8 +407,7 @@ velocity_smoother:
 
 collision_monitor:
   ros__parameters:
-    use_sim_time: True
-    base_frame_id: "saye/base_link"
+    base_frame_id: "saye"
     odom_frame_id: "odom"
     cmd_vel_in_topic: "cmd_vel_smoothed"
     cmd_vel_out_topic: "cmd_vel"
@@ -455,7 +436,6 @@ collision_monitor:
 
 docking_server:
   ros__parameters:
-    use_sim_time: True
     controller_frequency: 50.0
     initial_perception_timeout: 5.0
     wait_charge_timeout: 5.0
@@ -463,7 +443,7 @@ docking_server:
     undock_linear_tolerance: 0.05
     undock_angular_tolerance: 0.1
     max_retries: 3
-    base_frame: "saye/base_link"
+    base_frame: "saye"
     fixed_frame: "odom"
     dock_backwards: false
     dock_prestaging_tolerance: 0.5

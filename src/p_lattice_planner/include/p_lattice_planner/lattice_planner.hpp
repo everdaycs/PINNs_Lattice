@@ -14,6 +14,7 @@
 #include "nav2_util/lifecycle_node.hpp"
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 #include "nav2_costmap_2d/costmap_2d.hpp"
+#include "pinn/EdgeDynamicsEvaluator.hpp"
 
 namespace p_lattice_planner
 {
@@ -73,6 +74,7 @@ private:
   // Internal Components
   std::unique_ptr<GridAdapter> grid_adapter_;
   std::unique_ptr<SearchCore> search_core_;
+  std::shared_ptr<pinn::EdgeDynamicsEvaluator> pinn_evaluator_;
 };
 
 }  // namespace p_lattice_planner

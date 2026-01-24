@@ -1,0 +1,24 @@
+num_samples: 1000
+batch_size: 1000
+num_workers: 8
+output_dir: "data/pinn_lattice_dataset/stageA"
+seed: 42
+
+vehicle:
+  wheelbase: 0.2255
+  max_steering_angle: 0.40  # rad, ~23 deg
+  max_velocity: 1.0         # m/s
+  max_acceleration: 1.5     # m/s^2
+  track_width: 0.20
+  
+rollout:
+  dt: 0.05
+  tracking_controller: "pure_pursuit"
+  lookahead_dist: 0.4
+  mu_range: [0.3, 0.8]      # 摩擦系数范围
+  v0_range: [0.1, 1.0]      # 初始速度范围
+  
+primitive:
+  R_min: 0.533              # m, 物理极限 L/tan(alpha)
+  spatial_resolution: 0.05
+  num_headings: 16

@@ -98,9 +98,81 @@ docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash
 
 ---
 
+## 神经网络模块 (PINNs)
+
+本项目实现了基于神经网络的路径评估与速度修正策略（P1, P2, P3）。
+
+### 1. 数据采集与准备
+
+数据采集分为两个阶段，具体原理请参考 [README_data_collection.md](README_data_collection.md)。
+
+**环境依赖**:
+容器内需安装以下 Python 库：
+```bash
+pip install pandas pyarrow torch torchvision --break-system-packages
+```
+
+**运行采集**:
+```bash
+# Stage A: 采集运动原语可行性数据 (20w+)
+docker exec -it ackermann_sim bash -c "export PYTHONPATH=\$PYTHONPATH:/root/colcon_ws/src && cd /root/colcon_ws && python3 scripts/data_collect/collect_stageA.py"
+
+# Stage B: 采集包含地图环境特征的数据
+docker exec -it ackermann_sim bash -c "export PYTHONPATH=\$PYTHONPATH:/root/colcon_ws/src && cd /root/colcon_ws && python3 scripts/data_collect/collect_stageB.py"
+```
+
+---
+
+### 2. 模型训练与导出
+
+训练脚本位于 `scripts/pinn/`，产物将保存至 `artifacts/pinn/`。
+
+#### P1: 可行性/风险评估 (Feasibility Filter)
+预测运动原语在给定 $v_0$ 和 $\mu$ 下的风险分数 $Risk \in [0, 1+]$。
+```bash
+python3 scripts/pinn/train_p1.py \
+  --data data/pinn_lattice_dataset/stageB \
+  --output artifacts/pinn \
+  --epochs 50
+```
+
+#### P2: 安全速度修正 (Speed Corrector)
+预测安全速度上限 $v_{safe}$，使边代价计算更符合动力学约束。
+```bash
+python3 scripts/pinn/train_p2_vsafe.py \
+  --data data/pinn_lattice_dataset/stageA \
+  --output artifacts/pinn \
+  --epochs 50
+```
+
+**训练产物说明**:
+- `*.ts`: TorchScript 格式模型，供 C++ 直接加载。
+- `*_norm.json`: 特征均值/方差，用于推理时的归一化。
+- `p2_meta.json`: P2 模型元数据（$v_{min}, v_{max}$）。
+
+---
+
+### 3. C++ 推理与 P3 联合策略
+
+C++ 推理库位于 `src/pinn`，是一个独立的 ROS 2 包。
+
+**P3 联合策略逻辑**:
+1. **Green Zone (Risk <= T_ok)**: 直接通过，轻微 Risk 代价惩罚。
+2. **Yellow Zone (T_ok < Risk <= T_try)**: 触发 P2 速度预测。若 $v_{safe}$ 有效，调整 Edge Cost 并通过；否则剪枝（或重罚）。
+3. **Red Zone (Risk > T_try)**: 直接剪枝。
+
+**配置参数**:
+模型参数位于 `configs/pinn/planner_p3_params.yaml`，需在 `nav2_params.yaml` 中引用或直接配置。
+
+**编译 C++ 库**:
+```bash
+docker exec -it ackermann_sim bash -c "source /opt/ros/jazzy/setup.bash && cd /root/colcon_ws && colcon build --packages-select pinn"
+```
+
+---
+
 ## 注意事项
 
-
-*   **重置机制**：Benchmark 脚本通过直接调用 `gz service` API 实现瞬移重置，不依赖 ROS Topic，因此响应速度更快。
-*   **网络设置**：容器内部与宿主机共享网络，若需查看传感器原始数据，可在宿主机安装 ROS 2 Jazzy 并直接订阅相关话题。
+*   **路径挂载**：确保 `docker-compose.yaml` 中挂载了 `configs`、`scripts` 和 `data` 目录。
+*   **重置机制**：Benchmark 脚本通过直接调用 `gz service` API 实现瞬移重置，不依赖 ROS Topic。
 
