@@ -70,6 +70,9 @@ private:
   bool allow_unknown_;
   int max_planning_time_ms_;
   bool use_astar_;
+  double friction_mu_;
+  double heuristic_weight_;
+  double cost_penalty_weight_;
 
   // Internal Components
   std::unique_ptr<GridAdapter> grid_adapter_;

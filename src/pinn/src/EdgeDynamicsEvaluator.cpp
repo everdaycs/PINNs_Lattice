@@ -95,27 +95,22 @@ void EdgeDynamicsEvaluator::configure(const rclcpp_lifecycle::LifecycleNode::Sha
     }
 }
 
-uint64_t EdgeDynamicsEvaluator::checkCache(unsigned int prim_id, float v0, float mu, float& risk, float& v_safe) {
-    // Simple lattice quantization hash
-    // Assumption: prim_id is < 65536
-    // v0: 0-10m/s / 0.1 = 100 bins
-    // mu: 0-1 / 0.1 = 10 bins
-    
+uint64_t EdgeDynamicsEvaluator::getCacheKey(unsigned int prim_id, float v0, float mu) {
     int v_bin = static_cast<int>(v0 / bin_v0_);
     int mu_bin = static_cast<int>(mu / bin_mu_);
-    
-    // Hash layout: [32: id] [16: v_bin] [16: mu_bin]
-    uint64_t key = (static_cast<uint64_t>(prim_id) << 32) | (static_cast<uint64_t>(v_bin) << 16) | static_cast<uint64_t>(mu_bin);
-    
+    return (static_cast<uint64_t>(prim_id) << 32) | (static_cast<uint64_t>(v_bin) << 16) | static_cast<uint64_t>(mu_bin);
+}
+
+uint64_t EdgeDynamicsEvaluator::checkCache(unsigned int prim_id, float v0, float mu, float& risk_out, float& v_safe_out) {
+    uint64_t key = getCacheKey(prim_id, v0, mu);
     std::lock_guard<std::mutex> lock(cache_mutex_);
     auto it = cache_.find(key);
     if (it != cache_.end()) {
-        risk = it->second.risk;
-        v_safe = it->second.v_safe;
-        return 0; // Hit, 0 as success signal for simplicity here or use bool
+        risk_out = it->second.risk;
+        v_safe_out = it->second.v_safe;
+        return 1; // hit
     }
-    
-    return key; // Miss, return key for update
+    return 0; // miss
 }
 
 void EdgeDynamicsEvaluator::updateCache(uint64_t key, float risk, float v_safe) {
@@ -123,11 +118,102 @@ void EdgeDynamicsEvaluator::updateCache(uint64_t key, float risk, float v_safe) 
     cache_[key] = {risk, v_safe};
 }
 
+std::vector<EvaluationResult> EdgeDynamicsEvaluator::evaluateBatch(
+    const std::vector<unsigned int>& prim_ids,
+    const std::vector<PrimitiveInfo>& prim_infos,
+    float v0,
+    float mu,
+    const VehicleParams& veh) 
+{
+    size_t n = prim_ids.size();
+    std::vector<EvaluationResult> results(n);
+    std::vector<size_t> missing_indices;
+    std::vector<uint64_t> missing_keys;
+    
+    // 1. Check Cache
+    for (size_t i = 0; i < n; ++i) {
+        float risk, v_safe;
+        if (checkCache(prim_ids[i], v0, mu, risk, v_safe)) {
+            stats_.total_queries++;
+            stats_.cache_hits++;
+            
+            // Strategy logic
+            results[i].v_safe = v_safe;
+            if (risk <= t_ok_) {
+                results[i].accepted = true;
+                results[i].zone = Zone::GREEN;
+                results[i].extra_cost = w_risk_ * risk;
+            } else if (risk <= t_try_) {
+                results[i].accepted = true;
+                results[i].zone = Zone::YELLOW;
+                results[i].v_safe = v_safe;
+                double scale = (v0 > 0.01) ? (v0 / v_safe) : 1.0;
+                results[i].extra_cost = w_time_ * (prim_infos[i].length * scale) + w_risk_ * risk;
+            } else {
+                results[i].accepted = false;
+                results[i].zone = Zone::RED;
+                results[i].extra_cost = w_fail_;
+            }
+        } else {
+            missing_indices.push_back(i);
+            missing_keys.push_back(getCacheKey(prim_ids[i], v0, mu));
+        }
+    }
+    
+    if (missing_indices.empty()) return results;
+    
+    // 2. Prepare Batch Inference
+    std::vector<float> all_features;
+    for (size_t idx : missing_indices) {
+        auto feat = EdgeFeatureExtractor::extract(prim_infos[idx], v0, mu, veh);
+        all_features.insert(all_features.end(), feat.begin(), feat.end());
+    }
+    
+    std::vector<float> risks(missing_indices.size(), 0.0f);
+    if (enable_p1_) {
+        risks = p1_->inferBatch(all_features, missing_indices.size());
+    }
+    
+    std::vector<float> vsafes(missing_indices.size(), v0);
+    if (enable_p2_) {
+        vsafes = p2_->inferVsafeBatch(all_features, missing_indices.size());
+    }
+    
+    // 3. Process Results and Update Cache
+    for (size_t j = 0; j < missing_indices.size(); ++j) {
+        size_t i = missing_indices[j];
+        float risk = risks[j];
+        float v_safe = vsafes[j];
+        
+        updateCache(missing_keys[j], risk, v_safe);
+        stats_.total_queries++;
+        
+        results[i].v_safe = v_safe;
+        if (risk <= t_ok_) {
+            results[i].accepted = true;
+            results[i].zone = Zone::GREEN;
+            results[i].extra_cost = w_risk_ * risk;
+        } else if (risk <= t_try_) {
+            results[i].accepted = true;
+            results[i].zone = Zone::YELLOW;
+            results[i].v_safe = v_safe;
+            double scale = (v0 > 0.01) ? (v0 / v_safe) : 1.0;
+            results[i].extra_cost = w_time_ * (prim_infos[i].length * scale) + w_risk_ * risk;
+        } else {
+            results[i].accepted = false;
+            results[i].zone = Zone::RED;
+            results[i].extra_cost = w_fail_;
+        }
+    }
+    
+    return results;
+}
+
 EvaluationResult EdgeDynamicsEvaluator::evaluate(unsigned int prim_id, float v0, float mu) {
     // Dummy PrimitiveInfo for grid search (approx distance = 1m)
     PrimitiveInfo info;
     info.length = 1.0f;
-    info.curvature = 0.0f; 
+    info.max_curvature = 0.0f; 
     
     VehicleParams veh; // Defaults
     return evaluate(prim_id, info, v0, mu, veh);

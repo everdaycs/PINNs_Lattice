@@ -10,7 +10,7 @@ planner_server:
       pinn:
         # --- Feature Switches ---
         enable_p1: true  # Feasibility Filter
-        enable_p2: true  # Speed Corrector
+        enable_p2: false  # Speed Corrector
         
         # --- Models ---
         # Paths must be absolute or resolved via launch

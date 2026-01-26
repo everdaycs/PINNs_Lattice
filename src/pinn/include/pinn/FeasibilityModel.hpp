@@ -24,6 +24,13 @@ public:
     // Returns risk score (higher is worse)
     float inferRisk(const std::vector<float>& features);
     
+    /**
+     * @brief Batch inference for multiple primitives
+     * @param features Flattened N*K features. K is feature count per primitive
+     * @param batch_size N
+     */
+    std::vector<float> inferBatch(const std::vector<float>& features, size_t batch_size);
+    
     // Feature helper provided by separate class, but model holds norm params
     const std::vector<FeatureNorm>& getNormParams() const { return norms_; }
 

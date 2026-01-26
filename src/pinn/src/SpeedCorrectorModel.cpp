@@ -76,4 +76,34 @@ float SpeedCorrectorModel::inferVsafe(const std::vector<float>& features) {
     }
 }
 
+std::vector<float> SpeedCorrectorModel::inferVsafeBatch(const std::vector<float>& features, size_t batch_size) {
+    if (!loaded_) return std::vector<float>(batch_size, -1.0f);
+    
+    try {
+        size_t feat_dim = features.size() / batch_size;
+        std::vector<float> normed_feats = features;
+        for (size_t i = 0; i < batch_size; ++i) {
+            for (size_t j = 0; j < feat_dim; ++j) {
+                normed_feats[i * feat_dim + j] = (features[i * feat_dim + j] - mean_[j]) / std_[j];
+            }
+        }
+
+        std::vector<int64_t> sizes = {static_cast<int64_t>(batch_size), static_cast<int64_t>(feat_dim)};
+        at::Tensor input = torch::from_blob(normed_feats.data(), sizes, torch::kFloat32).clone();
+        
+        std::vector<torch::jit::IValue> inputs;
+        inputs.push_back(input);
+        
+        at::Tensor output = module_.forward(inputs).toTensor().reshape({-1});
+        auto data_ptr = output.data_ptr<float>();
+        std::vector<float> results(batch_size);
+        for (size_t i = 0; i < batch_size; ++i) {
+            results[i] = std::clamp(data_ptr[i], v_min_, v_max_);
+        }
+        return results;
+    } catch (...) {
+        return std::vector<float>(batch_size, -1.0f);
+    }
+}
+
 } // namespace pinn

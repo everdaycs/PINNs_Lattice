@@ -20,6 +20,11 @@ public:
     // Returns negative value if inference fails
     float inferVsafe(const std::vector<float>& features);
 
+    /**
+     * @brief Batch inference for multiple primitives
+     */
+    std::vector<float> inferVsafeBatch(const std::vector<float>& features, size_t batch_size);
+
 private:
     torch::jit::script::Module module_;
     

@@ -31,10 +31,11 @@ find_package(nlohmann_json REQUIRED)
 include_directories(include)
 
 # Create Library
-add_library(${PROJECT_NAME} 
+add_library(${PROJECT_NAME} SHARED
   src/FeasibilityModel.cpp
   src/EdgeFeatureExtractor.cpp
   src/SpeedCorrectorModel.cpp
+  src/EdgeDynamicsEvaluator.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -45,6 +46,11 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 target_link_libraries(${PROJECT_NAME} 
   "${TORCH_LIBRARIES}"
   nlohmann_json::nlohmann_json
+)
+
+ament_target_dependencies(${PROJECT_NAME}
+  rclcpp
+  rclcpp_lifecycle
 )
 
 # Install

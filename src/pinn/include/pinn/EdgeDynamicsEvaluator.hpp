@@ -75,10 +75,22 @@ public:
         float mu,
         const VehicleParams& veh
     );
+
+    /**
+     * @brief Batch version for high-performance search
+     */
+    std::vector<EvaluationResult> evaluateBatch(
+        const std::vector<unsigned int>& prim_ids,
+        const std::vector<PrimitiveInfo>& prim_infos,
+        float v0,
+        float mu,
+        const VehicleParams& veh
+    );
     
     void logStats(const rclcpp::Logger& logger);
 
 private:
+    uint64_t getCacheKey(unsigned int prim_id, float v0, float mu);
     uint64_t checkCache(unsigned int prim_id, float v0, float mu, float& risk_out, float& v_safe_out);
     void updateCache(uint64_t key, float risk, float v_safe);
 
@@ -109,7 +121,7 @@ private:
     
     // Stats
     EvaluatorStats stats_;
-    rclcpp::Node::SharedPtr node_;
+    rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
 };
 
 } // namespace pinn

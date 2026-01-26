@@ -1,9 +1,11 @@
 #include "p_lattice_planner/lattice_planner.hpp"
 #include <nav2_util/node_utils.hpp>
+#include <tf2/utils.h>
 #include <cmath>
 #include <queue>
 #include <unordered_map>
 #include <algorithm>
+#include <fstream>
 
 namespace p_lattice_planner
 {
@@ -40,167 +42,347 @@ public:
 
   unsigned int getSizeX() const { return costmap_->getSizeInCellsX(); }
   unsigned int getSizeY() const { return costmap_->getSizeInCellsY(); }
+  double getResolution() const { return costmap_->getResolution(); }
 
 private:
   nav2_costmap_2d::Costmap2D * costmap_;
 };
 
 // =========================================================================================
-// SearchCore: The A* Implementation
+// SearchCore: The A* Implementation (SE2 State Lattice)
 // =========================================================================================
 class SearchCore
 {
 public:
+  static constexpr int NUM_ANGLES = 16;
+  
   struct Node
   {
-    unsigned int x, y;
-    unsigned int index;
+    int x, y;           // Grid coordinates
+    int theta_idx;      // Discrete angle index [0, 15]
+    uint64_t index_3d;  // Unique ID for (x, y, theta)
     double cost_g;
     double cost_h;
     double cost_f;
-    unsigned int parent_index; // To reconstruct path
-    double v_limit = 1.0; // P2 corrected speed
+    uint64_t parent_index;
+    double v_limit = 1.0;
+    double yaw = 0.0;   // Continuous yaw
 
     // For priority queue
     bool operator>(const Node & other) const
     {
+      if (std::abs(cost_f - other.cost_f) < 1e-4) {
+          return cost_g < other.cost_g;
+      }
       return cost_f > other.cost_f;
     }
   };
 
-  SearchCore(GridAdapter * grid_adapter, std::shared_ptr<pinn::EdgeDynamicsEvaluator> evaluator) 
-    : grid_adapter_(grid_adapter), pinn_evaluator_(evaluator) {}
+  struct MotionPrimitive {
+    int dx, dy;
+    int d_theta; 
+    double length;
+    double kappa; 
+    double delta_yaw;
+    int id; 
+  };
+
+  struct RawPrimitive {
+    double l;
+    double k;
+    double dyaw;
+    int dt_idx;
+    int id;
+  };
+
+  SearchCore(GridAdapter * grid_adapter, std::shared_ptr<pinn::EdgeDynamicsEvaluator> evaluator, double h_weight = 4.0, double cost_weight = 2.0) 
+    : grid_adapter_(grid_adapter), pinn_evaluator_(evaluator), h_weight_(h_weight), cost_weight_(cost_weight) 
+  {
+    setupPrimitives();
+    precomputeRotatedPrimitives();
+  }
+
+  void setupPrimitives() {
+    // 基础参数定义
+    int step = 4;
+    
+    raw_primitives_ = {
+      { (double)step, 0.0, 0.0, 0, 0 },                     // 直行
+      { std::sqrt(step*step+1), 0.5, M_PI/8.0, 1, 1 },     // 左转 (R=2.0)
+      { std::sqrt(step*step+1), -0.5, -M_PI/8.0, -1, 2 },  // 右转 (R=2.0)
+      { std::sqrt((step-1)*(step-1)+4), 1.3333, M_PI/4.0, 2, 3 }, // 大左转 (R=0.75)
+      { std::sqrt((step-1)*(step-1)+4), -1.3333, -M_PI/4.0, -2, 4 } // 大右转 (R=0.75)
+    };
+  }
+
+  void precomputeRotatedPrimitives() {
+    rotated_primitives_.resize(NUM_ANGLES);
+    for (int t = 0; t < NUM_ANGLES; ++t) {
+      double angle = t * (2.0 * M_PI / NUM_ANGLES);
+      double cos_t = std::cos(angle);
+      double sin_t = std::sin(angle);
+      
+      for (const auto& raw : raw_primitives_) {
+        MotionPrimitive mp;
+        double dx_rel, dy_rel;
+        
+        // Exact Arc Geometry
+        if (std::abs(raw.k) < 1e-4) {
+            dx_rel = raw.l;
+            dy_rel = 0.0;
+        } else {
+            dx_rel = std::sin(raw.k * raw.l) / raw.k;
+            dy_rel = (1.0 - std::cos(raw.k * raw.l)) / raw.k;
+        }
+        
+        // Rotate and Round to Grid
+        mp.dx = std::round(dx_rel * cos_t - dy_rel * sin_t);
+        mp.dy = std::round(dx_rel * sin_t + dy_rel * cos_t);
+        mp.d_theta = raw.dt_idx;
+        mp.length = raw.l;
+        mp.kappa = raw.k;
+        mp.delta_yaw = raw.dyaw;
+        mp.id = raw.id;
+        rotated_primitives_[t].push_back(mp);
+      }
+    }
+  }
 
   void setVehicleParams(const pinn::VehicleParams& params) { veh_ = params; }
 
-  // A* Search
+  inline uint64_t getIndex3D(int x, int y, int theta_idx) {
+    return (static_cast<uint64_t>(y) * grid_width_ + x) * NUM_ANGLES + (theta_idx < 0 ? (theta_idx + NUM_ANGLES) : (theta_idx % NUM_ANGLES));
+  }
+
   bool search(
-    const geometry_msgs::msg::Point & start_world,
-    const geometry_msgs::msg::Point & goal_world,
+    const geometry_msgs::msg::Pose & start_world,
+    const geometry_msgs::msg::Pose & goal_world,
     std::vector<geometry_msgs::msg::PoseStamped> & plan,
     bool allow_unknown,
     double tolerance,
+    float mu,
     std::function<bool()> is_timeout)
   {
-    (void)tolerance; // Not using tolerance for simplified grid search for now
-
-    unsigned int start_x, start_y, goal_x, goal_y;
-    if (!grid_adapter_->worldToMap(start_world.x, start_world.y, start_x, start_y) ||
-        !grid_adapter_->worldToMap(goal_world.x, goal_world.y, goal_x, goal_y))
-    {
-      return false; // Out of bounds
+    unsigned int start_mx, start_my, goal_mx, goal_my;
+    if (!grid_adapter_->worldToMap(start_world.position.x, start_world.position.y, start_mx, start_my)) {
+        fprintf(stderr, "[LatticePlanner] FAILED worldToMap for Start: (%f, %f)\n", start_world.position.x, start_world.position.y);
+        return false;
+    }
+    if (!grid_adapter_->worldToMap(goal_world.position.x, goal_world.position.y, goal_mx, goal_my)) {
+        fprintf(stderr, "[LatticePlanner] FAILED worldToMap for Goal: (%f, %f)\n", goal_world.position.x, goal_world.position.y);
+        return false;
     }
 
-    auto start_index = grid_adapter_->getIndex(start_x, start_y);
-    auto goal_index = grid_adapter_->getIndex(goal_x, goal_y);
+    grid_width_ = grid_adapter_->getSizeX();
+    grid_height_ = grid_adapter_->getSizeY();
+    
+    fprintf(stderr, "[LatticePlanner] Search Start. Map: %dx%d, Start: %d,%d, Goal: %d,%d, Cost: %d\n", 
+            grid_width_, grid_height_, start_mx, start_my, goal_mx, goal_my, (int)grid_adapter_->getCost(start_mx, start_my));
+
+    size_t total_states = static_cast<size_t>(grid_width_) * grid_height_ * NUM_ANGLES;
+
+    if (cost_so_far_vec_.size() != total_states) {
+        cost_so_far_vec_.assign(total_states, 1e12);
+        came_from_vec_.assign(total_states, 0);
+    } else {
+        std::fill(cost_so_far_vec_.begin(), cost_so_far_vec_.end(), 1e12);
+    }
+
+    double start_yaw = tf2::getYaw(start_world.orientation);
+    int start_theta_idx = static_cast<int>(std::round(start_yaw / (2.0 * M_PI / NUM_ANGLES))) % NUM_ANGLES;
+    if (start_theta_idx < 0) start_theta_idx += NUM_ANGLES;
+
+    uint64_t start_idx_3d = getIndex3D(start_mx, start_my, start_theta_idx);
+
+    // 计算 2D 启发式
+    computeDijkstraHeuristic(goal_mx, goal_my);
 
     std::priority_queue<Node, std::vector<Node>, std::greater<Node>> open_list;
-    std::unordered_map<unsigned int, double> cost_so_far; // Index -> G cost
-    std::unordered_map<unsigned int, unsigned int> came_from; // Index -> Parent Index
+    
+    double h0 = heuristic(start_mx, start_my, goal_mx, goal_my) * h_weight_;
+    open_list.push({(int)start_mx, (int)start_my, start_theta_idx, start_idx_3d, 0.0, h0, h0, start_idx_3d, 1.0, start_yaw});
+    cost_so_far_vec_[start_idx_3d] = 0.0;
+    came_from_vec_[start_idx_3d] = start_idx_3d;
 
-    open_list.push({start_x, start_y, start_index, 0.0, heuristic(start_x, start_y, goal_x, goal_y), 0.0, start_index});
-    cost_so_far[start_index] = 0.0;
-    came_from[start_index] = start_index;
+    const double res = grid_adapter_->getResolution();
+    const int goal_tol_cells = std::max(1, (int)(tolerance / res));
 
-    const int dx[8] = {1, 0, -1, 0, 1, 1, -1, -1};
-    const int dy[8] = {0, 1, 0, -1, 1, -1, -1, 1};
-    const double move_cost[8] = {1.0, 1.0, 1.0, 1.0, 1.414, 1.414, 1.414, 1.414};
-
+    int iterations = 0;
     while (!open_list.empty())
     {
       if (is_timeout()) return false;
+      iterations++;
 
       Node current = open_list.top();
       open_list.pop();
 
-      if (current.index == goal_index)
+      if (current.cost_g > cost_so_far_vec_[current.index_3d]) continue;
+
+      if (iterations % 1000 == 0) {
+          RCLCPP_INFO(rclcpp::get_logger("LatticePlanner"), "Iter %d, queue size %zu, current g: %.2f, h: %.2f", iterations, open_list.size(), current.cost_g, current.cost_h);
+      }
+
+      // 目标检测
+      int dx_goal = current.x - (int)goal_mx;
+      int dy_goal = current.y - (int)goal_my;
+      if (std::abs(dx_goal) <= goal_tol_cells && std::abs(dy_goal) <= goal_tol_cells) 
       {
-        reconstructPath(start_index, goal_index, came_from, plan);
+        reconstructPath(start_idx_3d, current.index_3d, came_from_vec_, plan);
         return true;
       }
 
-      // 8-connected grid
-      for (int i = 0; i < 8; ++i)
-      {
-        unsigned int next_x = current.x + dx[i];
-        unsigned int next_y = current.y + dy[i];
+      const auto& current_prims = rotated_primitives_[current.theta_idx];
+      
+      // PINN 批量准备
+      std::vector<int> valid_prim_indices;
+      std::vector<unsigned int> p_ids;
+      std::vector<pinn::PrimitiveInfo> p_infos;
+      valid_prim_indices.reserve(5);
 
-        // Bounds check
-        if (next_x >= grid_adapter_->getSizeX() || next_y >= grid_adapter_->getSizeY()) continue;
+      for (size_t i = 0; i < current_prims.size(); ++i) {
+        const auto& prim = current_prims[i];
+        int nx = current.x + prim.dx;
+        int ny = current.y + prim.dy;
 
-        unsigned int next_index = grid_adapter_->getIndex(next_x, next_y);
-        unsigned char cost = grid_adapter_->getCost(next_x, next_y);
+        if (nx < 0 || nx >= (int)grid_width_ || ny < 0 || ny >= (int)grid_height_) continue;
 
-        // Collision check
-        if (cost == nav2_costmap_2d::LETHAL_OBSTACLE || 
-            cost == nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE || 
-            cost == nav2_costmap_2d::NO_INFORMATION && !allow_unknown)
-        {
-          continue;
-        }
+        unsigned char cost = grid_adapter_->getCost(nx, ny);
+        if (cost >= nav2_costmap_2d::LETHAL_OBSTACLE || 
+            (cost == nav2_costmap_2d::NO_INFORMATION && !allow_unknown)) continue;
 
-        // PINN Search Evaluator Integration
-        double v_next = current.v_limit;
+        valid_prim_indices.push_back(i);
         if (pinn_evaluator_) {
-          // For grid search, we treat each direction as a primitive index
-          auto res = pinn_evaluator_->evaluate(i, current.v_limit, 0.0); 
-          if (res.zone == pinn::Zone::RED) {
-            continue; // Prune unsafe edges
-          }
-          v_next = res.v_safe;
+          p_ids.push_back(prim.id);
+          pinn::PrimitiveInfo info;
+          info.length = prim.length * res;
+          info.start_x = 0; info.start_y = 0; info.start_yaw = 0;
+          info.end_x = info.length; info.end_yaw = prim.delta_yaw;
+          info.max_curvature = prim.kappa;
+          p_infos.push_back(info);
         }
+      }
 
-        double edge_cost = move_cost[i];
-        if (v_next > 0.01) {
-          edge_cost = move_cost[i] / v_next; // Time-based cost
-        }
+      std::vector<pinn::EvaluationResult> pinn_results;
+      if (pinn_evaluator_ && !p_ids.empty()) {
+        pinn_results = pinn_evaluator_->evaluateBatch(p_ids, p_infos, current.v_limit, mu, veh_);
+      }
 
-        double new_cost = cost_so_far[current.index] + edge_cost;
+      for (size_t k = 0; k < valid_prim_indices.size(); ++k) {
+        int i = valid_prim_indices[k];
+        const auto& prim = current_prims[i];
         
-        if (cost > 0 && cost != 255) {
-            new_cost += cost / 255.0; 
+        double v_next = current.v_limit;
+        double extra_penalty = 0.0;
+
+        if (pinn_evaluator_) {
+          if (!pinn_results[k].accepted) continue;
+          v_next = pinn_results[k].v_safe;
+          extra_penalty = pinn_results[k].extra_cost;
         }
 
-        if (cost_so_far.find(next_index) == cost_so_far.end() || new_cost < cost_so_far[next_index])
-        {
-          cost_so_far[next_index] = new_cost;
-          double h = heuristic(next_x, next_y, goal_x, goal_y);
-          open_list.push({next_x, next_y, next_index, new_cost, h, new_cost + h, current.index, v_next});
-          came_from[next_index] = current.index;
+        int nt = (current.theta_idx + prim.d_theta + NUM_ANGLES) % NUM_ANGLES;
+        int nx = current.x + prim.dx;
+        int ny = current.y + prim.dy;
+        uint64_t n_idx = getIndex3D(nx, ny, nt);
+
+        unsigned char cost = grid_adapter_->getCost(nx, ny);
+        double traversability_penalty = (cost / 255.0) * (prim.length * res) * cost_weight_;
+
+        double edge_cost = (prim.length * res / (v_next + 0.1)) + std::abs(prim.d_theta) * 0.2 + extra_penalty + traversability_penalty;
+        double new_g = current.cost_g + edge_cost;
+
+        if (new_g < cost_so_far_vec_[n_idx]) {
+          cost_so_far_vec_[n_idx] = new_g;
+          double h = heuristic(current.x + prim.dx, current.y + prim.dy, goal_mx, goal_my) * h_weight_;
+          open_list.push({current.x + prim.dx, current.y + prim.dy, nt, n_idx, new_g, h, new_g + h, current.index_3d, v_next, current.yaw + prim.delta_yaw});
+          came_from_vec_[n_idx] = current.index_3d;
         }
       }
     }
 
-    return false; // No path found
+    RCLCPP_WARN(rclcpp::get_logger("LatticePlanner"), "Search failed! Explored %d iterations. Open list empty: %s", iterations, open_list.empty() ? "yes" : "no");
+    return false;
   }
 
 private:
   GridAdapter * grid_adapter_;
   std::shared_ptr<pinn::EdgeDynamicsEvaluator> pinn_evaluator_;
   pinn::VehicleParams veh_;
+  std::vector<std::vector<MotionPrimitive>> rotated_primitives_; // [theta_idx][primitive_idx]
+  std::vector<RawPrimitive> raw_primitives_;
+  double h_weight_;
+  double cost_weight_;
+  unsigned int grid_width_, grid_height_;
 
-  double heuristic(unsigned int x1, unsigned int y1, unsigned int x2, unsigned int y2)
+  // 预分配大数组
+  std::vector<double> cost_so_far_vec_;
+  std::vector<uint64_t> came_from_vec_;
+  std::vector<float> dijkstra_map_; // 2D Obstacle Heuristic
+
+  void computeDijkstraHeuristic(int goal_x, int goal_y) {
+    if (dijkstra_map_.size() != (size_t)grid_width_ * grid_height_) {
+        dijkstra_map_.assign((size_t)grid_width_ * grid_height_, 1e9f);
+    } else {
+        std::fill(dijkstra_map_.begin(), dijkstra_map_.end(), 1e9f);
+    }
+
+    struct DistNode {
+        int x, y;
+        float d;
+        bool operator>(const DistNode& o) const { return d > o.d; }
+    };
+    std::priority_queue<DistNode, std::vector<DistNode>, std::greater<DistNode>> q;
+
+    dijkstra_map_[goal_y * grid_width_ + goal_x] = 0;
+    q.push({goal_x, goal_y, 0});
+
+    const int dx[] = {1, -1, 0, 0, 1, 1, -1, -1};
+    const int dy[] = {0, 0, 1, -1, 1, -1, 1, -1};
+    const float dg[] = {1.0f, 1.0f, 1.0f, 1.0f, 1.414f, 1.414f, 1.414f, 1.414f};
+
+    while (!q.empty()) { 
+        DistNode curr = q.top(); q.pop();
+        if (curr.d > dijkstra_map_[curr.y * grid_width_ + curr.x]) continue;
+
+        for (int i = 0; i < 8; ++i) {
+            int nx = curr.x + dx[i];
+            int ny = curr.y + dy[i];
+            if (nx < 0 || nx >= (int)grid_width_ || ny < 0 || ny >= (int)grid_height_) continue;
+            
+            unsigned char cost = grid_adapter_->getCost(nx, ny);
+            if (cost >= nav2_costmap_2d::LETHAL_OBSTACLE) continue;
+
+            float new_d = curr.d + dg[i] + (float)cost / 50.0f; 
+            int nidx = ny * grid_width_ + nx;
+            if (new_d < dijkstra_map_[nidx]) {
+                dijkstra_map_[nidx] = new_d;
+                q.push({nx, ny, new_d});
+            }
+        }
+    }
+  }
+
+  double heuristic(int x, int y, int gx, int gy)
   {
-    // Euclidean distance
-    double dx = static_cast<double>(x1) - static_cast<double>(x2);
-    double dy = static_cast<double>(y1) - static_cast<double>(y2);
-    return std::sqrt(dx * dx + dy * dy);
+    float d2 = dijkstra_map_[y * grid_width_ + x];
+    double res = grid_adapter_->getResolution();
+    if (d2 > 1e7) return std::hypot(x - gx, y - gy) * res;
+    return static_cast<double>(d2) * res;
   }
 
   void reconstructPath(
-    unsigned int start_index,
-    unsigned int goal_index,
-    const std::unordered_map<unsigned int, unsigned int> & came_from,
+    uint64_t start_index,
+    uint64_t goal_index,
+    const std::vector<uint64_t> & came_from,
     std::vector<geometry_msgs::msg::PoseStamped> & plan)
   {
-    unsigned int current = goal_index;
+    uint64_t current = goal_index;
     while (current != start_index)
     {
-      unsigned int mx, my;
-      // Reverse calculation of index not stored in GridAdapter easily without size
-      // We know index = my * size_x + mx -> mx = index % size_x, my = index / size_x
-      mx = current % grid_adapter_->getSizeX();
-      my = current / grid_adapter_->getSizeX();
+      uint64_t total_xy = current / NUM_ANGLES;
+      unsigned int mx = total_xy % grid_width_;
+      unsigned int my = total_xy / grid_width_;
+      int theta_idx = current % NUM_ANGLES;
 
       double wx, wy;
       grid_adapter_->mapToWorld(mx, my, wx, wy);
@@ -209,10 +391,16 @@ private:
       pose.pose.position.x = wx;
       pose.pose.position.y = wy;
       pose.pose.position.z = 0.0;
-      pose.pose.orientation.w = 1.0;
+      
+      double yaw = theta_idx * (2.0 * M_PI / NUM_ANGLES);
+      tf2::Quaternion q;
+      q.setRPY(0, 0, yaw);
+      pose.pose.orientation = tf2::toMsg(q);
+      
       plan.push_back(pose);
-
-      current = came_from.at(current);
+      uint64_t next = came_from[current];
+      if (next == current) break;
+      current = next;
     }
     std::reverse(plan.begin(), plan.end());
   }
@@ -248,13 +436,19 @@ void LatticePlanner::configure(
   // Parameter declaration
   nav2_util::declare_parameter_if_not_declared(node, name + ".tolerance", rclcpp::ParameterValue(0.5));
   nav2_util::declare_parameter_if_not_declared(node, name + ".allow_unknown", rclcpp::ParameterValue(true));
-  nav2_util::declare_parameter_if_not_declared(node, name + ".max_planning_time_ms", rclcpp::ParameterValue(2000));
+  nav2_util::declare_parameter_if_not_declared(node, name + ".max_planning_time_ms", rclcpp::ParameterValue(10000));
   nav2_util::declare_parameter_if_not_declared(node, name + ".use_astar", rclcpp::ParameterValue(true));
+  nav2_util::declare_parameter_if_not_declared(node, name + ".friction_mu", rclcpp::ParameterValue(0.8));
+  nav2_util::declare_parameter_if_not_declared(node, name + ".heuristic_weight", rclcpp::ParameterValue(4.0));
+  nav2_util::declare_parameter_if_not_declared(node, name + ".cost_penalty_weight", rclcpp::ParameterValue(10.0));
 
   node->get_parameter(name + ".tolerance", tolerance_);
   node->get_parameter(name + ".allow_unknown", allow_unknown_);
   node->get_parameter(name + ".max_planning_time_ms", max_planning_time_ms_);
   node->get_parameter(name + ".use_astar", use_astar_);
+  node->get_parameter(name + ".friction_mu", friction_mu_);
+  node->get_parameter(name + ".heuristic_weight", heuristic_weight_);
+  node->get_parameter(name + ".cost_penalty_weight", cost_penalty_weight_);
 
   // PINN Integration
   if (parent_node_.lock()) {
@@ -263,7 +457,7 @@ void LatticePlanner::configure(
   }
 
   grid_adapter_ = std::make_unique<GridAdapter>(costmap_);
-  search_core_ = std::make_unique<SearchCore>(grid_adapter_.get(), pinn_evaluator_);
+  search_core_ = std::make_unique<SearchCore>(grid_adapter_.get(), pinn_evaluator_, heuristic_weight_, cost_penalty_weight_);
 }
 
 void LatticePlanner::cleanup()
@@ -293,6 +487,8 @@ nav_msgs::msg::Path LatticePlanner::createPlan(
   std::function<bool()> cancel_checker)
 {
   (void)cancel_checker;
+  RCLCPP_INFO(logger_, "LatticePlanner: Planning from (%.2f, %.2f) to (%.2f, %.2f)", 
+              start.pose.position.x, start.pose.position.y, goal.pose.position.x, goal.pose.position.y);
   nav_msgs::msg::Path path;
   path.header.stamp = clock_->now();
   path.header.frame_id = costmap_ros_->getGlobalFrameID();
@@ -319,8 +515,8 @@ nav_msgs::msg::Path LatticePlanner::createPlan(
   };
 
   bool success = search_core_->search(
-      start.pose.position, goal.pose.position, poses,
-      allow_unknown_, tolerance_, is_timeout);
+      start.pose, goal.pose, poses,
+      allow_unknown_, tolerance_, friction_mu_, is_timeout);
 
   if (success)
   {

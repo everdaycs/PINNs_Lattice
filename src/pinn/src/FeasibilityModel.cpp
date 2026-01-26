@@ -71,4 +71,31 @@ float FeasibilityModel::infer(const std::vector<float>& features) {
     }
 }
 
+std::vector<float> FeasibilityModel::inferBatch(const std::vector<float>& features, size_t batch_size) {
+    if (!loaded_) return std::vector<float>(batch_size, 999.0f);
+    
+    try {
+        size_t feat_dim = features.size() / batch_size;
+        std::vector<float> normed_feats = features;
+        for (size_t i = 0; i < batch_size; ++i) {
+            for (size_t j = 0; j < feat_dim; ++j) {
+                normed_feats[i * feat_dim + j] = (features[i * feat_dim + j] - norms_[j].mean) / norms_[j].std;
+            }
+        }
+
+        std::vector<int64_t> sizes = {static_cast<int64_t>(batch_size), static_cast<int64_t>(feat_dim)};
+        at::Tensor input = torch::from_blob(normed_feats.data(), sizes, torch::kFloat32).clone();
+        
+        std::vector<torch::jit::IValue> inputs;
+        inputs.push_back(input);
+        
+        at::Tensor output = module_.forward(inputs).toTensor().reshape({-1});
+        auto data_ptr = output.data_ptr<float>();
+        return std::vector<float>(data_ptr, data_ptr + batch_size);
+    } catch (const std::exception& e) {
+        std::cerr << "Batch inference error: " << e.what() << std::endl;
+        return std::vector<float>(batch_size, 999.0f);
+    }
+}
+
 } // namespace pinn

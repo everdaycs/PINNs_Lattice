@@ -70,6 +70,8 @@ docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash
 docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash && python3 /root/colcon_ws/src/saye_bringup/scripts/benchmark_system.py --planners GridBased SmacPlannerHybrid SmacPlannerLattice LatticePlanner --out_dir /root/colcon_ws/benchmark_results --test_file /root/colcon_ws/src/saye_bringup/config/test_poses.yaml"
 ```
 
+docker exec -it ackermann_sim bash -c "source /root/colcon_ws/install/setup.bash && python3 /root/colcon_ws/src/saye_bringup/scripts/benchmark_system.py --planners LatticePlanner --out_dir /root/colcon_ws/benchmark_results --test_file /root/colcon_ws/src/saye_bringup/config/test_poses.yaml"
+
 **2. 各规划器说明与单独测试命令**：
 *   **GridBased (Dijkstra)**: 提供理论最短路径基准。
     ```bash

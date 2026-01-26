@@ -27,6 +27,7 @@ services:
       - ./configs:/root/colcon_ws/configs
       - ./scripts:/root/colcon_ws/scripts
       - ./data:/root/colcon_ws/data
+      - ./artifacts:/root/colcon_ws/artifacts
     privileged: true
     deploy:
       resources:
