@@ -103,19 +103,18 @@ public:
   }
 
   void setupPrimitives() {
-    // 基础参数定义
-    int step = 4;
-    
+    // Physically consistent primitives for R_min = 0.75m, Res = 0.05m
     raw_primitives_ = {
-      { (double)step, 0.0, 0.0, 0, 0 },                     // 直行
-      { std::sqrt(step*step+1), 0.5, M_PI/8.0, 1, 1 },     // 左转 (R=2.0)
-      { std::sqrt(step*step+1), -0.5, -M_PI/8.0, -1, 2 },  // 右转 (R=2.0)
-      { std::sqrt((step-1)*(step-1)+4), 1.3333, M_PI/4.0, 2, 3 }, // 大左转 (R=0.75)
-      { std::sqrt((step-1)*(step-1)+4), -1.3333, -M_PI/4.0, -2, 4 } // 大右转 (R=0.75)
+      { 8.0,  0.0,    0.0,       0, 0 },  // Straight (0.4m)
+      { 8.1,  0.97,   M_PI/8.0,  1, 1 },  // Med Left (R=1.03m)
+      { 8.1, -0.97,  -M_PI/8.0, -1, 2 },  // Med Right (R=1.03m)
+      { 11.8, 1.333,  M_PI/4.0,  2, 3 },  // Sharp Left (R=0.75m)
+      { 11.8, -1.333, -M_PI/4.0, -2, 4 }  // Sharp Right (R=0.75m)
     };
   }
 
   void precomputeRotatedPrimitives() {
+    double res = grid_adapter_->getResolution();
     rotated_primitives_.resize(NUM_ANGLES);
     for (int t = 0; t < NUM_ANGLES; ++t) {
       double angle = t * (2.0 * M_PI / NUM_ANGLES);
@@ -124,20 +123,21 @@ public:
       
       for (const auto& raw : raw_primitives_) {
         MotionPrimitive mp;
-        double dx_rel, dy_rel;
+        double dx_rel_m, dy_rel_m;
+        double s_m = raw.l * res;
         
-        // Exact Arc Geometry
+        // Exact Arc Geometry (in meters)
         if (std::abs(raw.k) < 1e-4) {
-            dx_rel = raw.l;
-            dy_rel = 0.0;
+            dx_rel_m = s_m;
+            dy_rel_m = 0.0;
         } else {
-            dx_rel = std::sin(raw.k * raw.l) / raw.k;
-            dy_rel = (1.0 - std::cos(raw.k * raw.l)) / raw.k;
+            dx_rel_m = std::sin(raw.k * s_m) / raw.k;
+            dy_rel_m = (1.0 - std::cos(raw.k * s_m)) / raw.k;
         }
         
-        // Rotate and Round to Grid
-        mp.dx = std::round(dx_rel * cos_t - dy_rel * sin_t);
-        mp.dy = std::round(dx_rel * sin_t + dy_rel * cos_t);
+        // Convert to Grid Steps and Rotate
+        mp.dx = std::round((dx_rel_m * cos_t - dy_rel_m * sin_t) / res);
+        mp.dy = std::round((dx_rel_m * sin_t + dy_rel_m * cos_t) / res);
         mp.d_theta = raw.dt_idx;
         mp.length = raw.l;
         mp.kappa = raw.k;
@@ -184,8 +184,10 @@ public:
     if (cost_so_far_vec_.size() != total_states) {
         cost_so_far_vec_.assign(total_states, 1e12);
         came_from_vec_.assign(total_states, 0);
+        came_from_prim_vec_.assign(total_states, -1);
     } else {
         std::fill(cost_so_far_vec_.begin(), cost_so_far_vec_.end(), 1e12);
+        std::fill(came_from_prim_vec_.begin(), came_from_prim_vec_.end(), -1);
     }
 
     double start_yaw = tf2::getYaw(start_world.orientation);
@@ -293,9 +295,10 @@ public:
 
         if (new_g < cost_so_far_vec_[n_idx]) {
           cost_so_far_vec_[n_idx] = new_g;
-          double h = heuristic(current.x + prim.dx, current.y + prim.dy, goal_mx, goal_my) * h_weight_;
-          open_list.push({current.x + prim.dx, current.y + prim.dy, nt, n_idx, new_g, h, new_g + h, current.index_3d, v_next, current.yaw + prim.delta_yaw});
+          double h = heuristic(nx, ny, goal_mx, goal_my) * h_weight_;
+          open_list.push({nx, ny, nt, n_idx, new_g, h, new_g + h, current.index_3d, v_next, current.yaw + prim.delta_yaw});
           came_from_vec_[n_idx] = current.index_3d;
+          came_from_prim_vec_[n_idx] = prim.id;
         }
       }
     }
@@ -317,6 +320,7 @@ private:
   // 预分配大数组
   std::vector<double> cost_so_far_vec_;
   std::vector<uint64_t> came_from_vec_;
+  std::vector<int> came_from_prim_vec_;
   std::vector<float> dijkstra_map_; // 2D Obstacle Heuristic
 
   void computeDijkstraHeuristic(int goal_x, int goal_y) {
@@ -377,32 +381,84 @@ private:
     std::vector<geometry_msgs::msg::PoseStamped> & plan)
   {
     uint64_t current = goal_index;
+    double res = grid_adapter_->getResolution();
+
     while (current != start_index)
     {
-      uint64_t total_xy = current / NUM_ANGLES;
-      unsigned int mx = total_xy % grid_width_;
-      unsigned int my = total_xy / grid_width_;
-      int theta_idx = current % NUM_ANGLES;
-
-      double wx, wy;
-      grid_adapter_->mapToWorld(mx, my, wx, wy);
-
-      geometry_msgs::msg::PoseStamped pose;
-      pose.pose.position.x = wx;
-      pose.pose.position.y = wy;
-      pose.pose.position.z = 0.0;
-      
-      double yaw = theta_idx * (2.0 * M_PI / NUM_ANGLES);
-      tf2::Quaternion q;
-      q.setRPY(0, 0, yaw);
-      pose.pose.orientation = tf2::toMsg(q);
-      
-      plan.push_back(pose);
       uint64_t next = came_from[current];
+      int prim_id = came_from_prim_vec_[current];
+
+      if (prim_id == -1) {
+          // Fallback to single point if no prim id (shouldn't happen except start)
+          addPoseToPlan(current, plan);
+      } else {
+          // Interpolate current primitive (from next to current)
+          const auto& prim = raw_primitives_[prim_id];
+          
+          uint64_t total_xy_next = next / NUM_ANGLES;
+          unsigned int mx_next = total_xy_next % grid_width_;
+          unsigned int my_next = total_xy_next / grid_width_;
+          int theta_idx_next = next % NUM_ANGLES;
+          
+          double wx_next, wy_next;
+          grid_adapter_->mapToWorld(mx_next, my_next, wx_next, wy_next);
+          double yaw_next = theta_idx_next * (2.0 * M_PI / NUM_ANGLES);
+
+          // Generate intermediate points (e.g. every 0.1m)
+          int num_pts = std::max(1, static_cast<int>(prim.l * res / 0.1));
+          for (int i = 0; i < num_pts; ++i) { // Skip i=num_pts to avoid overlapping with previous 'current'
+              double s = prim.l * (1.0 - (double)i / num_pts); // Reverse interpolation since we go backwards
+              double dx, dy, dyaw;
+              if (std::abs(prim.k) < 1e-4) {
+                  dx = s * res;
+                  dy = 0.0;
+                  dyaw = 0.0;
+              } else {
+                  dx = std::sin(prim.k * s * res) / prim.k;
+                  dy = (1.0 - std::cos(prim.k * s * res)) / prim.k;
+                  dyaw = prim.k * s * res;
+              }
+              
+              geometry_msgs::msg::PoseStamped pose;
+              pose.pose.position.x = wx_next + dx * std::cos(yaw_next) - dy * std::sin(yaw_next);
+              pose.pose.position.y = wy_next + dx * std::sin(yaw_next) + dy * std::cos(yaw_next);
+              pose.pose.position.z = 0.0;
+              
+              tf2::Quaternion q;
+              q.setRPY(0, 0, yaw_next + dyaw);
+              pose.pose.orientation = tf2::toMsg(q);
+              plan.push_back(pose);
+          }
+      }
+
       if (next == current) break;
       current = next;
     }
+    
+    // Add start pose
+    addPoseToPlan(start_index, plan);
     std::reverse(plan.begin(), plan.end());
+  }
+
+  void addPoseToPlan(uint64_t index, std::vector<geometry_msgs::msg::PoseStamped> & plan) {
+    uint64_t total_xy = index / NUM_ANGLES;
+    unsigned int mx = total_xy % grid_width_;
+    unsigned int my = total_xy / grid_width_;
+    int theta_idx = index % NUM_ANGLES;
+
+    double wx, wy;
+    grid_adapter_->mapToWorld(mx, my, wx, wy);
+
+    geometry_msgs::msg::PoseStamped pose;
+    pose.pose.position.x = wx;
+    pose.pose.position.y = wy;
+    pose.pose.position.z = 0.0;
+    
+    double yaw = theta_idx * (2.0 * M_PI / NUM_ANGLES);
+    tf2::Quaternion q;
+    q.setRPY(0, 0, yaw);
+    pose.pose.orientation = tf2::toMsg(q);
+    plan.push_back(pose);
   }
 };
 

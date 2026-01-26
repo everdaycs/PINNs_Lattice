@@ -307,7 +307,7 @@ planner_server:
       max_planning_time_ms: 2000
       use_astar: true
       heuristic_weight: 4.0
-      cost_penalty_weight: 15.0  # 增加此权重使规划器对 Costmap 更敏感
+      cost_penalty_weight: 8.0  # 稍微降低一点，避免过于剧烈的排斥导致的震荡
       p1_model_path: "/root/colcon_ws/artifacts/pinn/p1_model.ts"
       p1_norm_path: "/root/colcon_ws/artifacts/pinn/p1_norm.json"
       enable_p1: true
